@@ -1,5 +1,5 @@
 python-greenlet (0.3-1) unstable; urgency=low
 
-  * Initial release (Closes: #532831)
+  * Initial release (Closes: #532831).
 
  -- Örjan Persson <orange@fobie.net>  Sun, 04 Apr 2010 15:39:26 +0200
