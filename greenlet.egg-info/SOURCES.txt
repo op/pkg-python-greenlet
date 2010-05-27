@@ -7,6 +7,7 @@ greenlet.h
 setup.py
 slp_platformselect.h
 benchmarks/chain.py
+benchmarks/switch.py
 doc/greenlet.txt
 greenlet.egg-info/PKG-INFO
 greenlet.egg-info/SOURCES.txt
@@ -34,6 +35,9 @@ tests/test_generator_nested.py
 tests/test_generator_nested.pyc
 tests/test_greenlet.py
 tests/test_greenlet.pyc
+tests/test_leaks.py
+tests/test_leaks.pyc
+tests/test_leaks.py~
 tests/test_throw.py
 tests/test_throw.pyc
 tests/test_weakref.py
