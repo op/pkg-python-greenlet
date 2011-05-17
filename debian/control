@@ -9,7 +9,7 @@ Homepage: http://pypi.python.org/pypi/greenlet
 
 Package: python-greenlet-dbg
 Section: debug
-Architecture: i386 amd64 powerpc sparc s390 s390x arm mips
+Architecture: any
 Depends: ${misc:Depends}, python-greenlet (= ${binary:Version})
 Description: Lightweight in-process concurrent programming - debugging symbols
  The greenlet package is a spin-off of Stackless, a version of CPython that
@@ -41,7 +41,7 @@ Description: Lightweight in-process concurrent programming - documentation
  This is the documentation for greenlet.
 
 Package: python-greenlet-dev
-Architecture: i386 amd64 powerpc sparc s390 s390x arm mips
+Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, python-greenlet (= ${binary:Version})
 Description: Lightweight in-process concurrent programming - development files
  The greenlet package is a spin-off of Stackless, a version of CPython that
@@ -56,7 +56,7 @@ Description: Lightweight in-process concurrent programming - development files
  This is the development package for greenlet.
 
 Package: python-greenlet
-Architecture: i386 amd64 powerpc sparc s390 s390x arm mips
+Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, ${python:Depends}
 Conflicts: python-codespeak-lib (<< 1.0)
 Suggests: python-greenlet-doc, python-greenlet-dev, python-greenlet-dbg

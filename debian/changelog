@@ -1,7 +1,13 @@
+python-greenlet (0.3.1-2) unstable; urgency=low
+
+  * Build for architecture any (Closes: #607805).
+
+ -- Örjan Persson <orange@fobie.net>  Tue, 17 May 2011 18:00:37 +0200
+
 python-greenlet (0.3.1-1.1) unstable; urgency=low
 
   * Non-maintainer upload.
-  * Add build-dependency on python-support (closes: #620282).
+  * Add build-dependency on python-support (Closes: #620282).
 
  -- Jakub Wilk <jwilk@debian.org>  Fri, 08 Apr 2011 21:06:36 +0200
 
