@@ -1,9 +1,18 @@
 #!/usr/bin/make -f
+
 %:
-	dh  $@
+	dh $@
+
+override_dh_auto_clean:
+	rm -rf build/
+	find . -type f \( -name '*.py[co]' -or -name '*.so' -or -name '*.log' \) -delete
 
 override_dh_strip:
+ifeq (,$(filter nostrip,$(DEB_BUILD_OPTIONS)))
+	# See bug #576014
 	dh_strip --dbg-package=python-greenlet-dbg
+	cd debian/python-greenlet-dbg/usr/lib/debug/usr/lib && mv pyshared pymodules
+endif
 
 override_dh_installdocs:
 	dh_installdocs --link-doc=python-greenlet

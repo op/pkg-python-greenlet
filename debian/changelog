@@ -1,6 +1,7 @@
 python-greenlet (0.3.1-2) unstable; urgency=low
 
   * Build for architecture any (Closes: #607805).
+  * Include the debug extension (Closes: #607807).
 
  -- Örjan Persson <orange@fobie.net>  Tue, 17 May 2011 18:00:37 +0200
 
