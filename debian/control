@@ -7,6 +7,8 @@ Build-Depends: debhelper (>= 8.1.0~), python-all-dev, python-all-dbg, gcc (>= 4)
 Standards-Version: 3.9.1
 Section: python
 Homepage: http://pypi.python.org/pypi/greenlet
+Vcs-Browser: http://git.42mm.org/?p=python-greenlet
+Vcs-Git: git://git.42mm.org/git/python-greenlet
 
 Package: python-greenlet-dbg
 Section: debug
