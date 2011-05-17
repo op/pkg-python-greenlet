@@ -2,7 +2,7 @@ Source: python-greenlet
 Priority: extra
 Maintainer: Örjan Persson <orange@fobie.net>
 Uploaders: Andreas Schuldei <andreas@debian.org>
-Build-Depends: debhelper (>= 8.1.0~), python-all-dev, python-all-dbg, gcc (>= 4),
+Build-Depends: debhelper (>= 8.0), python-all-dev, python-all-dbg, gcc (>= 4),
                python-setuptools, python-support (>= 0.90)
 Standards-Version: 3.9.1
 Section: python
