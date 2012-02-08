@@ -4,6 +4,10 @@
 
 #include "../greenlet.h"
 
+#ifndef Py_RETURN_NONE
+#define Py_RETURN_NONE return Py_INCREF(Py_None), Py_None
+#endif
+
 #define TEST_MODULE_NAME "_test_extension"
 
 static PyObject *
@@ -123,6 +127,7 @@ test_throw(PyObject *self, PyGreenlet *g)
 	const char msg[] = "take that sucka!";
 	PyObject *msg_obj = Py_BuildValue("s", msg);
 	PyGreenlet_Throw(g, PyExc_ValueError, msg_obj, NULL);
+	Py_DECREF(msg_obj);
 	Py_RETURN_NONE;
 }
 
@@ -163,7 +168,7 @@ static struct PyModuleDef moduledef = {
 	NULL
 };
 
-PyObject *
+PyMODINIT_FUNC
 PyInit__test_extension(void)
 #else
 #define INITERROR return

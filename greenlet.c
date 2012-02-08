@@ -6,11 +6,6 @@
 #include "structmember.h"
 
 
-/* XXX major open bugs:
-   XXX - no GC.  Unfinished greenlets won't be deallocated if they
-   XXX   contain a cycle to themselves from anywhere in their frame stack.
-*/
-
 /***********************************************************
 
 A PyGreenlet is a range of C stack addresses that must be
@@ -85,6 +80,7 @@ The running greenlet's stack_start is undefined but not NULL.
 #ifndef Py_VISIT
 #define Py_VISIT(o) \
 	if (o) { \
+		int err; \
 		if ((err = visit((PyObject *)(o), arg))) { \
 			return err; \
 		} \
@@ -112,17 +108,52 @@ The running greenlet's stack_start is undefined but not NULL.
 #endif
 #endif
 
+#if PY_VERSION_HEX < 0x02050000
+typedef int Py_ssize_t;
+#endif
+
 extern PyTypeObject PyGreenlet_Type;
 
 /* The current greenlet in this thread state (holds a reference) */
-static PyGreenlet* ts_current = NULL;
-/* Holds a reference to the switching-from stack during the slp switch */
-static PyGreenlet* ts_origin = NULL;
+static PyGreenlet* volatile ts_current = NULL;
 /* Holds a reference to the switching-to stack during the slp switch */
-static PyGreenlet* ts_target = NULL;
+static PyGreenlet* volatile ts_target = NULL;
 /* NULL if error, otherwise args tuple to pass around during slp switch */
-static PyObject* ts_passaround_args = NULL;
-static PyObject* ts_passaround_kwargs = NULL;
+static PyObject* volatile ts_passaround_args = NULL;
+static PyObject* volatile ts_passaround_kwargs = NULL;
+
+/*
+ * Need to be careful when clearing passaround args and kwargs
+ * If deallocating args or kwargs ever causes stack switch (which
+ * currently shouldn't happen though), then args or kwargs might
+ * be borrowed or no longer valid, so better be paranoid
+ */
+#define g_passaround_clear() do { \
+	PyObject* args = ts_passaround_args; \
+	PyObject* kwargs = ts_passaround_kwargs; \
+	ts_passaround_args = NULL; \
+	ts_passaround_kwargs = NULL; \
+	Py_XDECREF(args); \
+	Py_XDECREF(kwargs); \
+} while(0)
+
+#define g_passaround_return_args() do { \
+	PyObject* args = ts_passaround_args; \
+	PyObject* kwargs = ts_passaround_kwargs; \
+	ts_passaround_args = NULL; \
+	ts_passaround_kwargs = NULL; \
+	Py_XDECREF(kwargs); \
+	return args; \
+} while(0)
+
+#define g_passaround_return_kwargs() do { \
+	PyObject* args = ts_passaround_args; \
+	PyObject* kwargs = ts_passaround_kwargs; \
+	ts_passaround_args = NULL; \
+	ts_passaround_kwargs = NULL; \
+	Py_XDECREF(args); \
+	return kwargs; \
+} while(0)
 
 /***********************************************************/
 /* Thread-aware routines, switching global variables when needed */
@@ -135,7 +166,7 @@ static PyObject* ts_delkey;
 static PyObject* PyExc_GreenletError;
 static PyObject* PyExc_GreenletExit;
 
-#undef GREENLET_USE_GC
+#define GREENLET_USE_GC
 
 #ifdef GREENLET_USE_GC
 #define GREENLET_GC_FLAGS Py_TPFLAGS_HAVE_GC
@@ -171,9 +202,6 @@ static PyGreenlet* green_create_main(void)
 	gmain->stack_stop = (char*) -1;
 	gmain->run_info = dict;
 	Py_INCREF(dict);
-#ifdef GREENLET_USE_GC
-	printf("green_create_main %p\n", gmain);
-#endif
 	return gmain;
 }
 
@@ -195,7 +223,7 @@ static int green_updatecurrent(void)
 	    (PyGreenlet*) PyDict_GetItem(tstate->dict, ts_curkey))) {
 		/* found -- remove it, to avoid keeping a ref */
 		Py_INCREF(next);
-		if (PyDict_SetItem(tstate->dict, ts_curkey, Py_None))
+		if (PyDict_DelItem(tstate->dict, ts_curkey))
 			PyErr_Clear();
 	}
 	else {
@@ -224,6 +252,50 @@ static PyObject* green_statedict(PyGreenlet* g)
 
 /***********************************************************/
 
+/* Some functions must not be inlined:
+   * slp_restore_state, when inlined into slp_switch might cause
+     it to restore stack over its own local variables
+   * slp_save_state, when inlined would add its own local
+     variables to the saved stack, wasting space
+   * slp_switch, cannot be inlined for obvious reasons
+   * g_initialstub, when inlined would receive a pointer into its
+     own stack frame, leading to incomplete stack save/restore
+*/
+
+#if defined(__GNUC__) && (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4))
+#define GREENLET_NOINLINE_SUPPORTED
+#define GREENLET_NOINLINE(name) __attribute__((noinline)) name
+#elif defined(_MSC_VER) && (_MSC_VER >= 1300)
+#define GREENLET_NOINLINE_SUPPORTED
+#define GREENLET_NOINLINE(name) __declspec(noinline) name
+#endif
+
+#ifdef GREENLET_NOINLINE_SUPPORTED
+/* add forward declarations */
+static void GREENLET_NOINLINE(slp_restore_state)(void);
+static int GREENLET_NOINLINE(slp_save_state)(char*);
+#if !(defined(MS_WIN64) && defined(_M_X64))
+static int GREENLET_NOINLINE(slp_switch)(void);
+#endif
+static void GREENLET_NOINLINE(g_initialstub)(void*);
+#define GREENLET_NOINLINE_INIT() do {} while(0)
+#else
+/* force compiler to call functions via pointers */
+static void (*slp_restore_state)(void);
+static int (*slp_save_state)(char*);
+static int (*slp_switch)(void);
+static void (*g_initialstub)(void*);
+#define GREENLET_NOINLINE(name) cannot_inline_ ## name
+#define GREENLET_NOINLINE_INIT() do { \
+	slp_restore_state = GREENLET_NOINLINE(slp_restore_state); \
+	slp_save_state = GREENLET_NOINLINE(slp_save_state); \
+	slp_switch = GREENLET_NOINLINE(slp_switch); \
+	g_initialstub = GREENLET_NOINLINE(g_initialstub); \
+} while(0)
+#endif
+
+/***********************************************************/
+
 static int g_save(PyGreenlet* g, char* stop)
 {
 	/* Save more of g's stack into the heap -- at least up to 'stop'
@@ -238,11 +310,11 @@ static int g_save(PyGreenlet* g, char* stop)
 	  g->stack_start |        |         |_______| g->stack_copy
 
 	 */
-	long sz1 = g->stack_saved;
-	long sz2 = stop - g->stack_start;
+	intptr_t sz1 = g->stack_saved;
+	intptr_t sz2 = stop - g->stack_start;
 	assert(g->stack_start != NULL);
 	if (sz2 > sz1) {
-		char* c = PyMem_Realloc(g->stack_copy, sz2);
+		char* c = (char*)PyMem_Realloc(g->stack_copy, sz2);
 		if (!c) {
 			PyErr_NoMemory();
 			return -1;
@@ -254,9 +326,10 @@ static int g_save(PyGreenlet* g, char* stop)
 	return 0;
 }
 
-static void slp_restore_state(void)
+static void GREENLET_NOINLINE(slp_restore_state)(void)
 {
 	PyGreenlet* g = ts_target;
+	PyGreenlet* owner = ts_current;
 	
 	/* Restore the heap copy back into the C stack */
 	if (g->stack_saved != 0) {
@@ -265,30 +338,32 @@ static void slp_restore_state(void)
 		g->stack_copy = NULL;
 		g->stack_saved = 0;
 	}
-	if (ts_current->stack_stop == g->stack_stop)
-		g->stack_prev = ts_current->stack_prev;
-	else
-		g->stack_prev = ts_current;
+	if (owner->stack_start == NULL)
+		owner = owner->stack_prev; /* greenlet is dying, skip it */
+	while (owner && owner->stack_stop <= g->stack_stop)
+		owner = owner->stack_prev; /* find greenlet with more stack */
+	g->stack_prev = owner;
 }
 
-static int slp_save_state(char* stackref)
+static int GREENLET_NOINLINE(slp_save_state)(char* stackref)
 {
 	/* must free all the C stack up to target_stop */
 	char* target_stop = ts_target->stack_stop;
-	assert(ts_current->stack_saved == 0);
-	if (ts_current->stack_start == NULL)
-		ts_current = ts_current->stack_prev;  /* not saved if dying */
+	PyGreenlet* owner = ts_current;
+	assert(owner->stack_saved == 0);
+	if (owner->stack_start == NULL)
+		owner = owner->stack_prev;  /* not saved if dying */
 	else
-		ts_current->stack_start = stackref;
+		owner->stack_start = stackref;
 	
-	while (ts_current->stack_stop < target_stop) {
+	while (owner->stack_stop < target_stop) {
 		/* ts_current is entierely within the area to free */
-		if (g_save(ts_current, ts_current->stack_stop))
+		if (g_save(owner, owner->stack_stop))
 			return -1;  /* XXX */
-		ts_current = ts_current->stack_prev;
+		owner = owner->stack_prev;
 	}
-	if (ts_current != ts_target) {
-		if (g_save(ts_current, target_stop))
+	if (owner != ts_target) {
+		if (g_save(owner, target_stop))
 			return -1;  /* XXX */
 	}
 	return 0;
@@ -311,19 +386,34 @@ static int slp_save_state(char* stackref)
 
 
 #define SLP_EVAL
+#define slp_switch GREENLET_NOINLINE(slp_switch)
 #include "slp_platformselect.h"
+#undef slp_switch
 
 #ifndef STACK_MAGIC
 #error "greenlet needs to be ported to this platform,\
  or teached how to detect your compiler properly."
 #endif /* !STACK_MAGIC */
 
+#ifdef EXTERNAL_ASM
+/* CCP addition: Make these functions, to be called from assembler.
+ * The token include file for the given platform should enable the
+ * EXTERNAL_ASM define so that this is included.
+ */
 
-/* This is a trick to prevent the compiler from inlining or
-   removing the frames */
-int (*_PyGreenlet_slp_switch) (void);
-int (*_PyGreenlet_switchstack) (void);
-void (*_PyGreenlet_initialstub) (void*);
+intptr_t slp_save_state_asm(intptr_t *ref) {
+    intptr_t diff;
+    SLP_SAVE_STATE(ref, diff);
+    return diff;
+}
+
+void slp_restore_state_asm(void) {
+    SLP_RESTORE_STATE();
+}
+
+extern int slp_switch(void);
+
+#endif
 
 static int g_switchstack(void)
 {
@@ -337,27 +427,35 @@ static int g_switchstack(void)
 	*/
 	int err;
 	{   /* save state */
+		PyGreenlet* current = ts_current;
 		PyThreadState* tstate = PyThreadState_GET();
-		ts_current->recursion_depth = tstate->recursion_depth;
-		ts_current->top_frame = tstate->frame;
+		current->recursion_depth = tstate->recursion_depth;
+		current->top_frame = tstate->frame;
+		current->exc_type = tstate->exc_type;
+		current->exc_value = tstate->exc_value;
+		current->exc_traceback = tstate->exc_traceback;
 	}
-	ts_origin = ts_current;
-	err = _PyGreenlet_slp_switch();
+	err = slp_switch();
 	if (err < 0) {   /* error */
-		Py_XDECREF(ts_passaround_args);
-		ts_passaround_args = NULL;
-
-		Py_XDECREF(ts_passaround_kwargs);
-		ts_passaround_kwargs = NULL;
+		g_passaround_clear();
 	}
 	else {
+		PyGreenlet* target = ts_target;
+		PyGreenlet* origin = ts_current;
 		PyThreadState* tstate = PyThreadState_GET();
-		tstate->recursion_depth = ts_target->recursion_depth;
-		tstate->frame = ts_target->top_frame;
-		ts_target->top_frame = NULL;
-		ts_current = ts_target;
-		Py_INCREF(ts_target);
-		Py_DECREF(ts_origin);
+		tstate->recursion_depth = target->recursion_depth;
+		tstate->frame = target->top_frame;
+		target->top_frame = NULL;
+		tstate->exc_type = target->exc_type;
+		target->exc_type = NULL;
+		tstate->exc_value = target->exc_value;
+		target->exc_value = NULL;
+		tstate->exc_traceback = target->exc_traceback;
+		target->exc_traceback = NULL;
+
+		ts_current = target;
+		Py_INCREF(target);
+		Py_DECREF(origin);
 	}
 	return err;
 }
@@ -390,13 +488,13 @@ g_switch(PyGreenlet* target, PyObject* args, PyObject* kwargs)
 	while (1) {
 		if (PyGreenlet_ACTIVE(target)) {
 			ts_target = target;
-			_PyGreenlet_switchstack();
+			g_switchstack();
 			break;
 		}
 		if (!PyGreenlet_STARTED(target)) {
 			void* dummymarker;
 			ts_target = target;
-			_PyGreenlet_initialstub(&dummymarker);
+			g_initialstub(&dummymarker);
 			break;
 		}
 		target = target->parent;
@@ -410,22 +508,23 @@ g_switch(PyGreenlet* target, PyObject* args, PyObject* kwargs)
 	   return both. */
 	if (ts_passaround_kwargs == NULL)
 	{
-		return ts_passaround_args;
+		g_passaround_return_args();
 	}
 	else if (PyDict_Size(ts_passaround_kwargs) == 0)
 	{
-		Py_DECREF(ts_passaround_kwargs);
-		return ts_passaround_args;
+		g_passaround_return_args();
 	}
 	else if (PySequence_Length(ts_passaround_args) == 0)
 	{
-		return ts_passaround_kwargs;
+		g_passaround_return_kwargs();
 	}
 	else
 	{
 		PyObject *tuple = PyTuple_New(2);
 		PyTuple_SetItem(tuple, 0, ts_passaround_args);
 		PyTuple_SetItem(tuple, 1, ts_passaround_kwargs);
+		ts_passaround_args = NULL;
+		ts_passaround_kwargs = NULL;
 		return tuple;
 	}
 }
@@ -464,7 +563,7 @@ g_handle_exit(PyObject *result)
 	return result;
 }
 
-static void g_initialstub(void* mark)
+static void GREENLET_NOINLINE(g_initialstub)(void* mark)
 {
 	int err;
 	PyObject* o;
@@ -472,11 +571,7 @@ static void g_initialstub(void* mark)
 	/* ts_target.run is the object to call in the new greenlet */
 	PyObject* run = PyObject_GetAttrString((PyObject*) ts_target, "run");
 	if (run == NULL) {
-		Py_XDECREF(ts_passaround_args);
-		ts_passaround_args = NULL;
-
-		Py_XDECREF(ts_passaround_kwargs);
-		ts_passaround_kwargs = NULL;
+		g_passaround_clear();
 		return;
 	}
 	/* now use run_info to store the statedict */
@@ -496,8 +591,11 @@ static void g_initialstub(void* mark)
 		ts_target->stack_prev = ts_current;
 	}
 	ts_target->top_frame = NULL;
+	ts_target->exc_type = NULL;
+	ts_target->exc_value = NULL;
+	ts_target->exc_traceback = NULL;
 	ts_target->recursion_depth = PyThreadState_GET()->recursion_depth;
-	err = _PyGreenlet_switchstack();
+	err = g_switchstack();
 	/* returns twice!
 	   The 1st time with err=1: we are in the new greenlet
 	   The 2nd time with err=0: back in the caller's greenlet
@@ -549,9 +647,6 @@ static PyObject* green_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 		Py_INCREF(ts_current);
 		((PyGreenlet*) o)->parent = ts_current;
 	}
-#ifdef GREENLET_USE_GC
-	printf("green_new %p\n", o);
-#endif
 	return o;
 }
 
@@ -571,7 +666,7 @@ static int green_init(PyGreenlet *self, PyObject *args, PyObject *kwargs)
 		if (green_setrun(self, run, NULL))
 			return -1;
 	}
-	if (nparent != NULL)
+	if (nparent != NULL && nparent != Py_None)
 		return green_setparent(self, nparent, NULL);
 	return 0;
 }
@@ -580,19 +675,19 @@ static int kill_greenlet(PyGreenlet* self)
 {
 	/* Cannot raise an exception to kill the greenlet if
 	   it is not running in the same thread! */
-#ifdef GREENLET_USE_GC
-	printf("kill_greenlet %p\n", self);
-#endif
 	if (self->run_info == PyThreadState_GET()->dict) {
 		/* The dying greenlet cannot be a parent of ts_current
 		   because the 'parent' field chain would hold a
 		   reference */
 		PyObject* result;
+		PyGreenlet* oldparent;
 		if (!STATE_OK) {
 			return -1;
 		}
-		Py_INCREF(ts_current);
+		oldparent = self->parent;
 		self->parent = ts_current;
+		Py_INCREF(ts_current);
+		Py_XDECREF(oldparent);
 		/* Send the greenlet a GreenletExit exception. */
 		PyErr_SetNone(PyExc_GreenletExit);
 		result = g_switch(self, NULL, NULL);
@@ -622,31 +717,31 @@ static int kill_greenlet(PyGreenlet* self)
 
 #ifdef GREENLET_USE_GC
 static int
-green_traverse(PyGreenlet *so, visitproc visit, void *arg)
+green_traverse(PyGreenlet *self, visitproc visit, void *arg)
 {
-	printf("green_traverse %p\n", so);
-	Py_VISIT((PyObject*)so->run_info);
-	Py_VISIT((PyObject*)so->parent);
-	Py_VISIT((PyObject*)so->top_frame);
-	Py_VISIT((PyObject*)so->stack_prev);
-	Py_VISIT((PyObject*)so->parent);
+	/* We must only visit referenced objects, i.e. only objects
+	   Py_INCREF'ed by this greenlet (directly or indirectly):
+	   - stack_prev is not visited: holds previous stack pointer, but it's not referenced
+	   - frames are not visited: alive greenlets are not garbage collected anyway */
+	Py_VISIT((PyObject*)self->parent);
+	Py_VISIT(self->run_info);
+	Py_VISIT(self->exc_type);
+	Py_VISIT(self->exc_value);
+	Py_VISIT(self->exc_traceback);
 	return 0;
 }
 
 static int green_is_gc(PyGreenlet* self)
 {
 	int rval;
-	rval = (self->stack_stop == ((char *)-1)) ? 0 : 1;
-	printf("green_is_gc %p = %d\n", self, rval);
+	/* Main and alive greenlets are not garbage collectable */
+	rval = (self->stack_stop == (char *)-1 || self->stack_start != NULL) ? 0 : 1;
 	return rval;
 }
 
 static int green_clear(PyGreenlet* self)
 {
-	printf("green_clear %p run_info %p\n", self, self->run_info);
-	if (PyGreenlet_ACTIVE(self))
-		return kill_greenlet(self);
-	return 0;
+	return 0; /* greenlet is not alive, so there's nothing to clear */
 }
 #endif
 
@@ -655,11 +750,9 @@ static void green_dealloc(PyGreenlet* self)
 	PyObject *error_type, *error_value, *error_traceback;
 
 #ifdef GREENLET_USE_GC
-	printf("green_dealloc %p\n", self);
 	PyObject_GC_UnTrack((PyObject *)self);
 	Py_TRASHCAN_SAFE_BEGIN(self);
 #endif /* GREENLET_USE_GC */
-	Py_CLEAR(self->parent);
 	if (PyGreenlet_ACTIVE(self)) {
 		/* Hacks hacks hacks copied from instance_dealloc() */
 		/* Temporarily resurrect the greenlet. */
@@ -692,7 +785,7 @@ static void green_dealloc(PyGreenlet* self)
 		}
 		if (Py_REFCNT(self) != 0) {
 			/* Resurrected! */
-			int refcnt = Py_REFCNT(self);
+			Py_ssize_t refcnt = Py_REFCNT(self);
 			_Py_NewReference((PyObject*) self);
 #ifdef GREENLET_USE_GC
 			PyObject_GC_Track((PyObject *)self);
@@ -705,6 +798,10 @@ static void green_dealloc(PyGreenlet* self)
 			goto green_dealloc_end;
 		}
 	}
+	Py_CLEAR(self->parent);
+	Py_CLEAR(self->exc_type);
+	Py_CLEAR(self->exc_value);
+	Py_CLEAR(self->exc_traceback);
 	if (self->weakreflist != NULL)
 		PyObject_ClearWeakRefs((PyObject *) self);
 	Py_CLEAR(self->run_info);
@@ -767,6 +864,8 @@ static PyObject* green_switch(
 	PyObject* args,
 	PyObject* kwargs)
 {
+	if (!STATE_OK)
+		return NULL;
 	Py_INCREF(args);
 	Py_XINCREF(kwargs);
 	return single_result(g_switch(self, args, kwargs));
@@ -862,6 +961,8 @@ green_throw(PyGreenlet *self, PyObject *args)
 		goto failed_throw;
 	}
 
+	if (!STATE_OK)
+		goto failed_throw;
 	return throw_greenlet(self, typ, val, tb);
 
  failed_throw:
@@ -1039,6 +1140,9 @@ PyGreenlet_Throw(PyGreenlet *self, PyObject *typ, PyObject *val, PyObject *tb)
 		PyErr_BadArgument();
 		return NULL;
 	}
+	Py_INCREF(typ);
+	Py_XINCREF(val);
+	Py_XINCREF(tb);
 	return throw_greenlet(self, typ, val, tb);
 }
 
@@ -1132,7 +1236,6 @@ PyTypeObject PyGreenlet_Type = {
 	GREENLET_tp_free,			/* tp_free */        
 	(inquiry)GREENLET_tp_is_gc,		/* tp_is_gc */
 };
-/* XXX need GC support */
 
 static PyObject* mod_getcurrent(PyObject* self)
 {
@@ -1162,12 +1265,13 @@ static struct PyModuleDef greenlet_module_def = {
 	GreenMethods,
 };
 
-PyObject *
+PyMODINIT_FUNC
 PyInit_greenlet(void)
 #else
 #define INITERROR return
 
-void initgreenlet(void)
+PyMODINIT_FUNC
+initgreenlet(void)
 #endif
 {
 	PyObject* m = NULL;
@@ -1175,9 +1279,7 @@ void initgreenlet(void)
 	PyObject *c_api_object;
 	static void *_PyGreenlet_API[PyGreenlet_API_pointers];
 
-	_PyGreenlet_switchstack = g_switchstack;
-	_PyGreenlet_slp_switch = slp_switch;
-	_PyGreenlet_initialstub = g_initialstub;
+	GREENLET_NOINLINE_INIT();
 
 #if PY_MAJOR_VERSION >= 3
 	m = PyModule_Create(&greenlet_module_def);
@@ -1214,8 +1316,13 @@ void initgreenlet(void)
 	{
 		INITERROR;
 	}
+#if PY_MAJOR_VERSION >= 3 || (PY_MAJOR_VERSION == 2 && PY_MINOR_VERSION >= 5)
+	PyExc_GreenletExit = PyErr_NewException("greenlet.GreenletExit",
+						PyExc_BaseException, NULL);
+#else
 	PyExc_GreenletExit = PyErr_NewException("greenlet.GreenletExit",
 						NULL, NULL);
+#endif
 	if (PyExc_GreenletExit == NULL)
 	{
 		INITERROR;
@@ -1267,7 +1374,11 @@ void initgreenlet(void)
 	_PyGreenlet_API[PyGreenlet_SetParent_NUM] =
 		(void *) PyGreenlet_SetParent;
 
+#ifdef GREENLET_USE_PYCAPSULE
+	c_api_object = PyCapsule_New((void *) _PyGreenlet_API, "greenlet._C_API", NULL);
+#else
 	c_api_object = PyCObject_FromVoidPtr((void *) _PyGreenlet_API, NULL);
+#endif
 	if (c_api_object != NULL)
 	{
 		PyModule_AddObject(m, "_C_API", c_api_object);

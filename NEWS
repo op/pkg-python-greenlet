@@ -1,3 +1,27 @@
+0.3.3
+=====
+* Use sphinx to build documentation and publish it on greenlet.rtfd.org
+* Prevent segfaults on openbsd 4/i386
+* Workaround gcc-4.0 not allowing to clobber rbx
+* Enhance test infrastructure
+* Fix possible compilation problems when including greenlet.h in C++ mode
+* Make the greenlet module work on x64 windows
+* Add a test for greenlet C++ exceptions
+* Fix compilation on Solaris with SunStudio
+
+0.3.2
+=====
+* Fix various crashes with recent gcc versions and VC90
+* Try to fix stack save/restore on arm32
+* Store and restore the threadstate on exceptions like pypy/stackless do
+* GreenletExit is now based on BaseException on Python >= 2.5
+* Switch to using PyCapsule for Python 2.7 and 3.1
+* Port for AIX on PowerPC
+* Fix the sparc/solaris header
+* Improved build dependencies patch from flub.
+* Can't pass parent=None to greenlet.greenlet() (fixes #21)
+* Rudimentary gc support (only non-live greenlets are garbage collected though)
+
 0.3.1
 =====
 * Fix reference leak when passing keyword arguments to greenlets (mbachry)

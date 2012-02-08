@@ -25,46 +25,13 @@
 #define alloca _alloca
 
 #define STACK_REFPLUS 1
-
-#ifdef SLP_EVAL
-
 #define STACK_MAGIC 0
 
-/* Some magic to quell warnings and keep slp_switch() from crashing when built
-   with VC90. Disable global optimizations, and the warning: frame pointer
-   register 'ebp' modified by inline assembly code */
-#pragma optimize("g", off)
-#pragma warning(disable:4731)
+/* Use the generic support for an external assembly language slp_switch function. */
+#define EXTERNAL_ASM
 
-static int
-slp_switch(void)
-{
-    void* seh;
-    register int *stackref, stsizediff;
-    __asm mov eax, fs:[0]
-    __asm mov [seh], eax
-    __asm mov stackref, esp;
-    /* modify EBX, ESI and EDI in order to get them preserved */
-    __asm mov ebx, ebx;
-    __asm xchg esi, edi;
-    {
-        SLP_SAVE_STATE(stackref, stsizediff);
-        __asm {
-            mov     eax, stsizediff
-            add     esp, eax
-            add     ebp, eax
-        }
-        SLP_RESTORE_STATE();
-    }
-    __asm mov eax, [seh]
-    __asm mov fs:[0], eax
-    return 0;
-}
-
-/* re-enable ebp warning and global optimizations. */
-#pragma optimize("g", on)
-#pragma warning(default:4731)
-
+#ifdef SLP_EVAL
+/* This always uses the external masm assembly file. */
 #endif
 
 /*
@@ -72,6 +39,7 @@ slp_switch(void)
  */
 
 /* we have IsBadReadPtr available, so we can peek at objects */
+/*
 #define STACKLESS_SPY
 
 #ifdef IMPLEMENT_STACKLESSMODULE
@@ -81,8 +49,9 @@ slp_switch(void)
 static int IS_ON_STACK(void*p)
 {
     int stackref;
-    int stackbase = ((int)&stackref) & 0xfffff000;
-    return (int)p >= stackbase && (int)p < stackbase + 0x00100000;
-} 
+    intptr_t stackbase = ((intptr_t)&stackref) & 0xfffff000;
+    return (intptr_t)p >= stackbase && (intptr_t)p < stackbase + 0x00100000;
+}
 
 #endif
+*/
