@@ -38,7 +38,47 @@ class GreenletTests(unittest.TestCase):
         lst.append(2)
         g.switch()
         lst.append(4)
-        self.assertEquals(lst, list(range(5)))
+        self.assertEqual(lst, list(range(5)))
+
+    def test_parent_equals_None(self):
+        g = greenlet(parent=None)
+
+    def test_run_equals_None(self):
+        g = greenlet(run=None)
+
+    def test_two_children(self):
+        lst = []
+        def f():
+            lst.append(1)
+            greenlet.getcurrent().parent.switch()
+            lst.extend([1, 1])
+        g = greenlet(f)
+        h = greenlet(f)
+        g.switch()
+        self.assertEqual(len(lst), 1)
+        h.switch()
+        self.assertEqual(len(lst), 2)
+        h.switch()
+        self.assertEqual(len(lst), 4)
+        self.assertEqual(h.dead, True)
+        g.switch()
+        self.assertEqual(len(lst), 6)
+        self.assertEqual(g.dead, True)
+
+    def test_two_recursive_children(self):
+        lst = []
+        def f():
+            lst.append(1)
+            greenlet.getcurrent().parent.switch()
+        def g():
+            lst.append(1)
+            g = greenlet(f)
+            g.switch()
+            lst.append(1)
+        g = greenlet(g)
+        g.switch()
+        self.assertEqual(len(lst), 3)
+        self.assertEqual(sys.getrefcount(g), 2)
 
     def test_threads(self):
         success = []
@@ -50,7 +90,7 @@ class GreenletTests(unittest.TestCase):
             th.start()
         for th in ths:
             th.join()
-        self.assertEquals(len(success), len(ths))
+        self.assertEqual(len(success), len(ths))
 
     def test_exception(self):
         seen = []
@@ -59,18 +99,18 @@ class GreenletTests(unittest.TestCase):
         g1.switch(seen)
         g2.switch(seen)
         g2.parent = g1
-        self.assertEquals(seen, [])
+        self.assertEqual(seen, [])
         self.assertRaises(SomeError, g2.switch)
-        self.assertEquals(seen, [SomeError])
+        self.assertEqual(seen, [SomeError])
         g2.switch()
-        self.assertEquals(seen, [SomeError])
+        self.assertEqual(seen, [SomeError])
 
     def test_send_exception(self):
         seen = []
         g1 = greenlet(fmain)
         g1.switch(seen)
         self.assertRaises(KeyError, send_exception, g1, KeyError)
-        self.assertEquals(seen, [KeyError])
+        self.assertEqual(seen, [KeyError])
 
     def test_dealloc(self):
         seen = []
@@ -78,13 +118,13 @@ class GreenletTests(unittest.TestCase):
         g2 = greenlet(fmain)
         g1.switch(seen)
         g2.switch(seen)
-        self.assertEquals(seen, [])
+        self.assertEqual(seen, [])
         del g1
         gc.collect()
-        self.assertEquals(seen, [greenlet.GreenletExit])
+        self.assertEqual(seen, [greenlet.GreenletExit])
         del g2
         gc.collect()
-        self.assertEquals(seen, [greenlet.GreenletExit, greenlet.GreenletExit])
+        self.assertEqual(seen, [greenlet.GreenletExit, greenlet.GreenletExit])
 
     def test_dealloc_other_thread(self):
         seen = []
@@ -107,22 +147,22 @@ class GreenletTests(unittest.TestCase):
         t = threading.Thread(target=f)
         t.start()
         lock.acquire()
-        self.assertEquals(seen, [])
-        self.assertEquals(len(someref), 1)
+        self.assertEqual(seen, [])
+        self.assertEqual(len(someref), 1)
         del someref[:]
         gc.collect()
         # g1 is not released immediately because it's from another thread
-        self.assertEquals(seen, [])
+        self.assertEqual(seen, [])
         lock2.release()
         lock.acquire()
-        self.assertEquals(seen, [greenlet.GreenletExit])
+        self.assertEqual(seen, [greenlet.GreenletExit])
         lock2.release()
         t.join()
 
     def test_frame(self):
         def f1():
             f = sys._getframe(0)
-            self.assertEquals(f.f_back, None)
+            self.assertEqual(f.f_back, None)
             greenlet.getcurrent().parent.switch(f)
             return "meaning of life"
         g = greenlet(f1)
@@ -131,8 +171,8 @@ class GreenletTests(unittest.TestCase):
         self.assertTrue(g)
         next = g.switch()
         self.assertFalse(g)
-        self.assertEquals(next, 'meaning of life')
-        self.assertEquals(g.gr_frame, None)
+        self.assertEqual(next, 'meaning of life')
+        self.assertEqual(g.gr_frame, None)
 
     def test_thread_bug(self):
         def runner(x):
@@ -147,8 +187,8 @@ class GreenletTests(unittest.TestCase):
 
     def test_switch_kwargs(self):
         def foo(a, b):
-            self.assertEquals(a, 4)
-            self.assertEquals(b, 2)
+            self.assertEqual(a, 4)
+            self.assertEqual(b, 2)
         greenlet(foo).switch(a=4, b=2)
 
     def test_switch_kwargs_to_parent(self):
@@ -157,9 +197,9 @@ class GreenletTests(unittest.TestCase):
             greenlet.getcurrent().parent.switch(2, x=3)
             return x, x ** 2
         g = greenlet(foo)
-        self.assertEquals({'x': 3}, g.switch(3))
-        self.assertEquals(((2,), {'x': 3}), g.switch())
-        self.assertEquals((3, 9), g.switch())
+        self.assertEqual({'x': 3}, g.switch(3))
+        self.assertEqual(((2,), {'x': 3}), g.switch())
+        self.assertEqual((3, 9), g.switch())
 
     def test_switch_to_another_thread(self):
         data = {}
@@ -180,3 +220,18 @@ class GreenletTests(unittest.TestCase):
         self.assertTrue(error != None, "greenlet.error was not raised!")
         done_event.set()
         thread.join()
+
+
+    def test_exc_state(self):
+        def f():
+            try:
+                raise ValueError('fun')
+            except:
+                exc_info = sys.exc_info()
+                greenlet(h).switch()
+                self.assertEqual(exc_info, sys.exc_info())
+
+        def h():
+            self.assertEqual(sys.exc_info(), (None, None, None))
+
+        greenlet(f).switch()
