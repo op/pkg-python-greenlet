@@ -1,11 +1,28 @@
 #!/usr/bin/make -f
 
+PYVERSIONS := $(shell pyversions -sv)
+
 %:
-	dh $@
+	dh $@ --with quilt
 
 override_dh_auto_clean:
 	rm -rf build/
-	find . -type f \( -name '*.py[co]' -or -name '*.so' -or -name '*.log' \) -delete
+	find . \( -type f -or -type l \) \( -name '*.py[co]' -or -name '*.so' -or -name '*.log' \) -delete
+	cd doc && make clean
+
+override_dh_auto_build:
+	dh_auto_build
+	cd doc && PYTHONPATH=.. make html
+
+override_dh_auto_test: $(PYVERSIONS:%=test-%-stamp)
+test-%-stamp:
+ifeq (,$(findstring nocheck,$(DEB_BUILD_OPTIONS)))
+	rm -rf build/test-$*
+	mkdir build/test-$*
+	python$* setup.py install_lib -d build/test-$*
+	PYTHONPATH=build/test-$* python$* run-tests.py -n
+	touch test-python-$*-stamp
+endif
 
 override_dh_strip:
 ifeq (,$(filter nostrip,$(DEB_BUILD_OPTIONS)))
@@ -17,4 +34,4 @@ endif
 override_dh_installdocs:
 	dh_installdocs --link-doc=python-greenlet
 
-.PHONY: override_dh_strip override_dh_installdocs
+.PHONY: override_dh_auto_clean override_dh_auto_build override_dh_auto_test override_dh_strip override_dh_installdocs

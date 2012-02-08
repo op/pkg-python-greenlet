@@ -4,5 +4,6 @@ Author: Kyle Ambroff
 Abstract: Describes how to use python-greenlet and the API offerred by it.
 Section: Programming/Python
 
-Format: Text
-Files: /usr/share/doc/python-greenlet-doc/text/greenlet.txt.gz
+Format: HTML
+Index: /usr/share/doc/python-greenlet-doc/html/index.html
+Files: /usr/share/doc/python-greenlet-doc/html/greenlet.html

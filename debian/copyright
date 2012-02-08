@@ -6,12 +6,14 @@ It was downloaded from http://pypi.python.org/pypi/greenlet
 
 Upstream Authors:
 
+    Ralf Schmitt <ralf@systemexit.de>
     Kyle Ambroff <kyle@ambroff.com>
     Armin Rigo <arigo@ulb.ac.be>
     Bob Ippolito <bob@redivi.com>
 
 Copyright:
 
+    Copyright (c) 2012 Ralf Schmitt
     Copyright (C) 2009-2010 Kyle Ambroff
     Copyright (C) 2002-2010 Armin Rigo
     Copyright (C) 2004-2008 Bob Ippolito
@@ -43,7 +45,7 @@ The Debian packaging is:
 
     Copyright (C) 2010 Örjan Persson <orange@fobie.net>
 
-and is licensed under the GPL version 3, 
+and is licensed under the GPL version 3,
 see `/usr/share/common-licenses/GPL-3'.
 
 The files ./slp_platformselect.h and the files in ./platform/ are

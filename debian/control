@@ -2,8 +2,8 @@ Source: python-greenlet
 Priority: extra
 Maintainer: Örjan Persson <orange@fobie.net>
 Uploaders: Andreas Schuldei <andreas@debian.org>
-Build-Depends: debhelper (>= 8.0), python-all-dev, python-all-dbg, gcc (>= 4),
-               python-setuptools, python-support (>= 0.90)
+Build-Depends: debhelper, gcc, python-all-dev, python-all-dbg,
+ python-setuptools, python-support, python-sphinx
 Standards-Version: 3.9.2
 Section: python
 Homepage: http://pypi.python.org/pypi/greenlet
@@ -30,7 +30,7 @@ Description: Lightweight in-process concurrent programming - debugging symbols
 Package: python-greenlet-doc
 Section: doc
 Architecture: all
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, libjs-jquery, libjs-underscore
 Suggests: python-greenlet, python-greenlet-dev
 Description: Lightweight in-process concurrent programming - documentation
  The greenlet package is a spin-off of Stackless, a version of CPython that
