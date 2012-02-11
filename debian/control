@@ -3,7 +3,7 @@ Priority: extra
 Maintainer: Örjan Persson <orange@fobie.net>
 Uploaders: Andreas Schuldei <andreas@debian.org>
 Build-Depends: debhelper, gcc, python-all-dev, python-all-dbg,
- python-setuptools, python-support, python-sphinx
+ python-setuptools, python-support, python-sphinx, quilt
 Standards-Version: 3.9.2
 Section: python
 Homepage: http://pypi.python.org/pypi/greenlet
