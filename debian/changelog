@@ -1,3 +1,15 @@
+python-greenlet (0.4.0-1) unstable; urgency=low
+
+  * New maintainer.
+  * New upstream release.
+  * Fix all packaging problems.
+  * Build with hardening enabled.
+  * Update Standards-Version and correct debhelper dependency.
+  * Switch to dh_python2 and sync with Ubuntu (closes: #673244).
+  * Symlink jquery.js and underscore.js to their packaged versions.
+
+ -- Laszlo Boszormenyi (GCS) <gcs@debian.hu>  Fri, 31 Aug 2012 19:25:36 +0200
+
 python-greenlet (0.3.3-1) unstable; urgency=low
 
   * New upstream version (Closes: #652316, #650293).

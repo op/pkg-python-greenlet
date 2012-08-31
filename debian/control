@@ -1,14 +1,11 @@
 Source: python-greenlet
 Priority: extra
-Maintainer: Örjan Persson <orange@fobie.net>
-Uploaders: Andreas Schuldei <andreas@debian.org>
-Build-Depends: debhelper, gcc, python-all-dev, python-all-dbg,
- python-setuptools, python-support, python-sphinx, quilt
-Standards-Version: 3.9.2
+Maintainer: Laszlo Boszormenyi (GCS) <gcs@debian.hu>
+Build-Depends: dpkg-dev (>= 1.16.1~), debhelper (>= 7.0.50~), python-all-dev,
+ python-all-dbg, python-setuptools, python-support, python-sphinx
+Standards-Version: 3.9.3
 Section: python
 Homepage: http://pypi.python.org/pypi/greenlet
-Vcs-Browser: http://git.42mm.org/?p=python-greenlet
-Vcs-Git: git://git.42mm.org/git/python-greenlet
 
 Package: python-greenlet-dbg
 Section: debug

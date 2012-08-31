@@ -4,6 +4,7 @@ LICENSE.PSF
 MANIFEST.in
 NEWS
 README.rst
+conftest.py
 greenlet.c
 greenlet.h
 make-win-release
@@ -28,6 +29,7 @@ greenlet.egg-info/top_level.txt
 platform/switch_amd64_unix.h
 platform/switch_arm32_gcc.h
 platform/switch_mips_unix.h
+platform/switch_ppc64_linux.h
 platform/switch_ppc_aix.h
 platform/switch_ppc_linux.h
 platform/switch_ppc_macosx.h
@@ -50,4 +52,6 @@ tests/test_generator_nested.py
 tests/test_greenlet.py
 tests/test_leaks.py
 tests/test_throw.py
+tests/test_tracing.py
+tests/test_version.py
 tests/test_weakref.py

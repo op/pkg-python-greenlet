@@ -1,12 +1,16 @@
 #!/usr/bin/make -f
 
+DPKG_EXPORT_BUILDFLAGS = 1
+include /usr/share/dpkg/buildflags.mk
+
 PYVERSIONS := $(shell pyversions -sv)
 
 %:
-	dh $@ --with quilt
+	dh $@ --with python2
 
 override_dh_auto_clean:
 	rm -rf build/
+	rm -f greenlet.egg-info/PKG-INFO
 	find . \( -type f -or -type l \) \( -name '*.py[co]' -or -name '*.so' -or -name '*.log' \) -delete
 	cd doc && make clean
 
@@ -24,14 +28,7 @@ ifeq (,$(findstring nocheck,$(DEB_BUILD_OPTIONS)))
 	touch test-python-$*-stamp
 endif
 
-override_dh_strip:
-ifeq (,$(filter nostrip,$(DEB_BUILD_OPTIONS)))
-	# See bug #576014
-	dh_strip --dbg-package=python-greenlet-dbg
-	cd debian/python-greenlet-dbg/usr/lib/debug/usr/lib && mv pyshared pymodules
-endif
-
 override_dh_installdocs:
 	dh_installdocs --link-doc=python-greenlet
 
-.PHONY: override_dh_auto_clean override_dh_auto_build override_dh_auto_test override_dh_strip override_dh_installdocs
+.PHONY: override_dh_auto_clean override_dh_auto_build override_dh_auto_test override_dh_installdocs

@@ -1,2 +1,2 @@
-usr/lib/python*/*-packages/*[!_][!_].so
 usr/lib/python*/*-packages/*.egg-info
+usr/lib/python*/*-packages/*[!_][!_].so
