@@ -13,7 +13,7 @@ Upstream Authors:
 
 Copyright:
 
-    Copyright (c) 2012 Ralf Schmitt
+    Copyright (C) 2012 Ralf Schmitt
     Copyright (C) 2009-2010 Kyle Ambroff
     Copyright (C) 2002-2010 Armin Rigo
     Copyright (C) 2004-2008 Bob Ippolito
@@ -51,6 +51,8 @@ see `/usr/share/common-licenses/GPL-3'.
 The files ./slp_platformselect.h and the files in ./platform/ are
 based on code from Stackless Python and is:
 
+    Copyright (C) 2011 Alexey Borzenkov <snaury@gmail.com>
+    Copyright (C) 2006 Richard Tew <richard.m.tew@gmail.com>
     Copyright (C) 2004-2006 Bob Ippolito <bob@redivi.com>
     Copyright (C) 2005 Thiemo Seufer <ths@debian.org>
     Copyright (C) 2002-2004 Hye-Shik Chang <perky@FreeBSD.org>
