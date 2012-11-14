@@ -23,15 +23,11 @@ def symlink_or_copy(src, dst):
 
 class build_ext(_build_ext):
     def build_extension(self, ext):
-        result = _build_ext.build_extension(self, ext)
-        if self.inplace:
-            return result
-        modpath = self.get_ext_fullname(ext.name).split('.')
+        self.inplace = 0
+        _build_ext.build_extension(self, ext)
         filename = self.get_ext_filename(ext.name)
-        filename = os.path.split(filename)[-1]
-        filename = os.path.join(*modpath[:-1] + [filename])
         build_path = os.path.abspath(os.path.join(self.build_lib, filename))
-        src_path = os.path.abspath(os.path.basename(build_path))
+        src_path = os.path.abspath(filename)
         if build_path != src_path:
             try:
                 os.unlink(src_path)
@@ -42,5 +38,3 @@ class build_ext(_build_ext):
                 sys.stderr.write('Linking %s to %s\n' % (build_path, src_path))
 
             symlink_or_copy(build_path, src_path)
-
-        return result

@@ -114,46 +114,24 @@ typedef int Py_ssize_t;
 
 extern PyTypeObject PyGreenlet_Type;
 
-/* The current greenlet in this thread state (holds a reference) */
-static PyGreenlet* volatile ts_current = NULL;
-/* Holds a reference to the switching-to stack during the slp switch */
+/* Defines that customize greenlet module behaviour */
+#ifndef GREENLET_USE_GC
+#define GREENLET_USE_GC 1
+#endif
+
+#ifndef GREENLET_USE_TRACING
+#define GREENLET_USE_TRACING 1
+#endif
+
+/* Weak reference to the switching-to greenlet during the slp switch */
 static PyGreenlet* volatile ts_target = NULL;
+/* Strong reference to the switching from greenlet after the switch */
+static PyGreenlet* volatile ts_origin = NULL;
+/* Strong reference to the current greenlet in this thread state */
+static PyGreenlet* volatile ts_current = NULL;
 /* NULL if error, otherwise args tuple to pass around during slp switch */
 static PyObject* volatile ts_passaround_args = NULL;
 static PyObject* volatile ts_passaround_kwargs = NULL;
-
-/*
- * Need to be careful when clearing passaround args and kwargs
- * If deallocating args or kwargs ever causes stack switch (which
- * currently shouldn't happen though), then args or kwargs might
- * be borrowed or no longer valid, so better be paranoid
- */
-#define g_passaround_clear() do { \
-	PyObject* args = ts_passaround_args; \
-	PyObject* kwargs = ts_passaround_kwargs; \
-	ts_passaround_args = NULL; \
-	ts_passaround_kwargs = NULL; \
-	Py_XDECREF(args); \
-	Py_XDECREF(kwargs); \
-} while(0)
-
-#define g_passaround_return_args() do { \
-	PyObject* args = ts_passaround_args; \
-	PyObject* kwargs = ts_passaround_kwargs; \
-	ts_passaround_args = NULL; \
-	ts_passaround_kwargs = NULL; \
-	Py_XDECREF(kwargs); \
-	return args; \
-} while(0)
-
-#define g_passaround_return_kwargs() do { \
-	PyObject* args = ts_passaround_args; \
-	PyObject* kwargs = ts_passaround_kwargs; \
-	ts_passaround_args = NULL; \
-	ts_passaround_kwargs = NULL; \
-	Py_XDECREF(args); \
-	return kwargs; \
-} while(0)
 
 /***********************************************************/
 /* Thread-aware routines, switching global variables when needed */
@@ -163,12 +141,15 @@ static PyObject* volatile ts_passaround_kwargs = NULL;
 
 static PyObject* ts_curkey;
 static PyObject* ts_delkey;
+#if GREENLET_USE_TRACING
+static PyObject* ts_tracekey;
+static PyObject* ts_event_switch;
+static PyObject* ts_event_throw;
+#endif
 static PyObject* PyExc_GreenletError;
 static PyObject* PyExc_GreenletExit;
 
-#define GREENLET_USE_GC
-
-#ifdef GREENLET_USE_GC
+#if GREENLET_USE_GC
 #define GREENLET_GC_FLAGS Py_TPFLAGS_HAVE_GC
 #define GREENLET_tp_alloc PyType_GenericAlloc
 #define GREENLET_tp_free PyObject_GC_Del
@@ -207,46 +188,91 @@ static PyGreenlet* green_create_main(void)
 
 static int green_updatecurrent(void)
 {
+	PyObject *exc, *val, *tb;
 	PyThreadState* tstate;
-	PyGreenlet* next;
+	PyGreenlet* current;
 	PyGreenlet* previous;
 	PyObject* deleteme;
 
-	/* save ts_current as the current greenlet of its own thread */
-	previous = ts_current;
-	if (PyDict_SetItem(previous->run_info, ts_curkey, (PyObject*) previous))
-		return -1;
+green_updatecurrent_restart:
+	/* save current exception */
+	PyErr_Fetch(&exc, &val, &tb);
 
 	/* get ts_current from the active tstate */
 	tstate = PyThreadState_GET();
-	if (tstate->dict && (next =
+	if (tstate->dict && (current =
 	    (PyGreenlet*) PyDict_GetItem(tstate->dict, ts_curkey))) {
 		/* found -- remove it, to avoid keeping a ref */
-		Py_INCREF(next);
-		if (PyDict_DelItem(tstate->dict, ts_curkey))
-			PyErr_Clear();
+		Py_INCREF(current);
+		PyDict_DelItem(tstate->dict, ts_curkey);
 	}
 	else {
 		/* first time we see this tstate */
-		next = green_create_main();
-		if (next == NULL)
+		current = green_create_main();
+		if (current == NULL) {
+			Py_XDECREF(exc);
+			Py_XDECREF(val);
+			Py_XDECREF(tb);
 			return -1;
+		}
 	}
-	ts_current = next;
+	assert(current->run_info == tstate->dict);
+
+green_updatecurrent_retry:
+	/* update ts_current as soon as possible, in case of nested switches */
+	Py_INCREF(current);
+	previous = ts_current;
+	ts_current = current;
+
+	/* save ts_current as the current greenlet of its own thread */
+	if (PyDict_SetItem(previous->run_info, ts_curkey, (PyObject*) previous)) {
+		Py_DECREF(previous);
+		Py_DECREF(current);
+		Py_XDECREF(exc);
+		Py_XDECREF(val);
+		Py_XDECREF(tb);
+		return -1;
+	}
 	Py_DECREF(previous);
+
 	/* green_dealloc() cannot delete greenlets from other threads, so
 	   it stores them in the thread dict; delete them now. */
 	deleteme = PyDict_GetItem(tstate->dict, ts_delkey);
 	if (deleteme != NULL) {
 		PyList_SetSlice(deleteme, 0, INT_MAX, NULL);
 	}
+
+	if (ts_current != current) {
+		/* some Python code executed above and there was a thread switch,
+		 * so ts_current points to some other thread again. We need to
+		 * delete ts_curkey (it's likely there) and retry. */
+		PyDict_DelItem(tstate->dict, ts_curkey);
+		goto green_updatecurrent_retry;
+	}
+
+	/* release an extra reference */
+	Py_DECREF(current);
+
+	/* restore current exception */
+	PyErr_Restore(exc, val, tb);
+
+	/* thread switch could happen during PyErr_Restore, in that
+	   case there's nothing to do except restart from scratch. */
+	if (ts_current->run_info != tstate->dict)
+		goto green_updatecurrent_restart;
+
 	return 0;
 }
 
 static PyObject* green_statedict(PyGreenlet* g)
 {
-	while (!PyGreenlet_STARTED(g))
+	while (!PyGreenlet_STARTED(g)) {
 		g = g->parent;
+		if (g == NULL) {
+			/* garbage collected greenlet in chain */
+			return NULL;
+		}
+	}
 	return g->run_info;
 }
 
@@ -277,14 +303,14 @@ static int GREENLET_NOINLINE(slp_save_state)(char*);
 #if !(defined(MS_WIN64) && defined(_M_X64))
 static int GREENLET_NOINLINE(slp_switch)(void);
 #endif
-static void GREENLET_NOINLINE(g_initialstub)(void*);
+static int GREENLET_NOINLINE(g_initialstub)(void*);
 #define GREENLET_NOINLINE_INIT() do {} while(0)
 #else
 /* force compiler to call functions via pointers */
 static void (*slp_restore_state)(void);
 static int (*slp_save_state)(char*);
 static int (*slp_switch)(void);
-static void (*g_initialstub)(void*);
+static int (*g_initialstub)(void*);
 #define GREENLET_NOINLINE(name) cannot_inline_ ## name
 #define GREENLET_NOINLINE_INIT() do { \
 	slp_restore_state = GREENLET_NOINLINE(slp_restore_state); \
@@ -417,13 +443,22 @@ extern int slp_switch(void);
 
 static int g_switchstack(void)
 {
-	/* perform a stack switch according to some global variables
+	/* Perform a stack switch according to some global variables
 	   that must be set before:
 	   - ts_current: current greenlet (holds a reference)
-	   - ts_target: greenlet to switch to
+	   - ts_target: greenlet to switch to (weak reference)
 	   - ts_passaround_args: NULL if PyErr_Occurred(),
-	             else a tuple of args sent to ts_target (holds a reference)
-	   - ts_passaround_kwargs: same as ts_passaround_args
+	       else a tuple of args sent to ts_target (holds a reference)
+	   - ts_passaround_kwargs: switch kwargs (holds a reference)
+	   On return results are passed via global variables as well:
+	   - ts_origin: originating greenlet (holds a reference)
+	   - ts_current: current greenlet (holds a reference)
+	   - ts_passaround_args: NULL if PyErr_Occurred(),
+	       else a tuple of args sent to ts_current (holds a reference)
+	   - ts_passaround_kwargs: switch kwargs (holds a reference)
+	   It is very important that stack switch is 'atomic', i.e. no
+	   calls into other Python code allowed (except very few that
+	   are safe), because global variables are very fragile.
 	*/
 	int err;
 	{   /* save state */
@@ -437,7 +472,14 @@ static int g_switchstack(void)
 	}
 	err = slp_switch();
 	if (err < 0) {   /* error */
-		g_passaround_clear();
+		PyGreenlet* current = ts_current;
+		current->top_frame = NULL;
+		current->exc_type = NULL;
+		current->exc_value = NULL;
+		current->exc_traceback = NULL;
+
+		assert(ts_origin == NULL);
+		ts_target = NULL;
 	}
 	else {
 		PyGreenlet* target = ts_target;
@@ -453,30 +495,67 @@ static int g_switchstack(void)
 		tstate->exc_traceback = target->exc_traceback;
 		target->exc_traceback = NULL;
 
-		ts_current = target;
+		assert(ts_origin == NULL);
 		Py_INCREF(target);
-		Py_DECREF(origin);
+		ts_current = target;
+		ts_origin = origin;
+		ts_target = NULL;
 	}
 	return err;
 }
+
+#if GREENLET_USE_TRACING
+static int
+g_calltrace(PyObject* tracefunc, PyObject* event, PyGreenlet* origin, PyGreenlet* target)
+{
+	PyObject *retval;
+	PyObject *exc_type, *exc_val, *exc_tb;
+	PyThreadState *tstate;
+	PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
+	tstate = PyThreadState_GET();
+	tstate->tracing++;
+	tstate->use_tracing = 0;
+	retval = PyObject_CallFunction(tracefunc, "O(OO)", event, origin, target);
+	tstate->tracing--;
+	tstate->use_tracing = (tstate->tracing <= 0 &&
+		((tstate->c_tracefunc != NULL) ||
+		(tstate->c_profilefunc != NULL)));
+	if (retval == NULL) {
+		/* In case of exceptions trace function is removed */
+		if (PyDict_GetItem(tstate->dict, ts_tracekey))
+			PyDict_DelItem(tstate->dict, ts_tracekey);
+		Py_XDECREF(exc_type);
+		Py_XDECREF(exc_val);
+		Py_XDECREF(exc_tb);
+		return -1;
+	} else
+		Py_DECREF(retval);
+	PyErr_Restore(exc_type, exc_val, exc_tb);
+	return 0;
+}
+#endif
 
 static PyObject *
 g_switch(PyGreenlet* target, PyObject* args, PyObject* kwargs)
 {
 	/* _consumes_ a reference to the args tuple and kwargs dict,
 	   and return a new tuple reference */
+	int err;
+	PyObject* run_info;
 
 	/* check ts_current */
 	if (!STATE_OK) {
-		Py_DECREF(args);
+		Py_XDECREF(args);
 		Py_XDECREF(kwargs);
 		return NULL;
 	}
-	if (green_statedict(target) != ts_current->run_info) {
-		PyErr_SetString(PyExc_GreenletError,
-				"cannot switch to a different thread");
-		Py_DECREF(args);
+	run_info = green_statedict(target);
+	if (run_info == NULL || run_info != ts_current->run_info) {
+		Py_XDECREF(args);
 		Py_XDECREF(kwargs);
+		PyErr_SetString(PyExc_GreenletError, run_info
+				? "cannot switch to a different thread"
+				: "cannot switch to a garbage collected greenlet");
 		return NULL;
 	}
 
@@ -485,19 +564,58 @@ g_switch(PyGreenlet* target, PyObject* args, PyObject* kwargs)
 
 	/* find the real target by ignoring dead greenlets,
 	   and if necessary starting a greenlet. */
-	while (1) {
+	while (target) {
 		if (PyGreenlet_ACTIVE(target)) {
 			ts_target = target;
-			g_switchstack();
+			err = g_switchstack();
 			break;
 		}
 		if (!PyGreenlet_STARTED(target)) {
 			void* dummymarker;
 			ts_target = target;
-			g_initialstub(&dummymarker);
+			err = g_initialstub(&dummymarker);
+			if (err == 1) {
+				continue; /* retry the switch */
+			}
 			break;
 		}
 		target = target->parent;
+	}
+
+	/* For a very short time, immediately after the 'atomic'
+	   g_switchstack() call, global variables are in a known state.
+	   We need to save everything we need, before it is destroyed
+	   by calls into arbitrary Python code. */
+	args = ts_passaround_args;
+	ts_passaround_args = NULL;
+	kwargs = ts_passaround_kwargs;
+	ts_passaround_kwargs = NULL;
+	if (err < 0) {
+		/* Turn switch errors into switch throws */
+		assert(ts_origin == NULL);
+		Py_CLEAR(kwargs);
+		Py_CLEAR(args);
+	} else {
+		PyGreenlet *origin;
+#if GREENLET_USE_TRACING
+		PyGreenlet *current;
+		PyObject *tracefunc;
+#endif
+		origin = ts_origin;
+		ts_origin = NULL;
+#if GREENLET_USE_TRACING
+		current = ts_current;
+		if ((tracefunc = PyDict_GetItem(current->run_info, ts_tracekey)) != NULL) {
+			Py_INCREF(tracefunc);
+			if (g_calltrace(tracefunc, args ? ts_event_switch : ts_event_throw, origin, current) < 0) {
+				/* Turn trace errors into switch throws */
+				Py_CLEAR(kwargs);
+				Py_CLEAR(args);
+			}
+			Py_DECREF(tracefunc);
+		}
+#endif
+		Py_DECREF(origin);
 	}
 
 	/* We need to figure out what values to pass to the target greenlet
@@ -506,25 +624,30 @@ g_switch(PyGreenlet* target, PyObject* args, PyObject* kwargs)
 	   If only keyword arguments were passed, then we'll pass the keyword
 	   argument dict. Otherwise, we'll create a tuple of (args, kwargs) and
 	   return both. */
-	if (ts_passaround_kwargs == NULL)
+	if (kwargs == NULL)
 	{
-		g_passaround_return_args();
+		return args;
 	}
-	else if (PyDict_Size(ts_passaround_kwargs) == 0)
+	else if (PyDict_Size(kwargs) == 0)
 	{
-		g_passaround_return_args();
+		Py_DECREF(kwargs);
+		return args;
 	}
-	else if (PySequence_Length(ts_passaround_args) == 0)
+	else if (PySequence_Length(args) == 0)
 	{
-		g_passaround_return_kwargs();
+		Py_DECREF(args);
+		return kwargs;
 	}
 	else
 	{
 		PyObject *tuple = PyTuple_New(2);
-		PyTuple_SetItem(tuple, 0, ts_passaround_args);
-		PyTuple_SetItem(tuple, 1, ts_passaround_kwargs);
-		ts_passaround_args = NULL;
-		ts_passaround_kwargs = NULL;
+		if (tuple == NULL) {
+			Py_DECREF(args);
+			Py_DECREF(kwargs);
+			return NULL;
+		}
+		PyTuple_SET_ITEM(tuple, 0, args);
+		PyTuple_SET_ITEM(tuple, 1, kwargs);
 		return tuple;
 	}
 }
@@ -563,56 +686,120 @@ g_handle_exit(PyObject *result)
 	return result;
 }
 
-static void GREENLET_NOINLINE(g_initialstub)(void* mark)
+static int GREENLET_NOINLINE(g_initialstub)(void* mark)
 {
 	int err;
-	PyObject* o;
+	PyObject *o, *run;
+	PyObject *exc, *val, *tb;
+	PyObject *run_info;
+	PyGreenlet* self = ts_target;
+	PyObject* args = ts_passaround_args;
+	PyObject* kwargs = ts_passaround_kwargs;
 
-	/* ts_target.run is the object to call in the new greenlet */
-	PyObject* run = PyObject_GetAttrString((PyObject*) ts_target, "run");
+	/* save exception in case getattr clears it */
+	PyErr_Fetch(&exc, &val, &tb);
+	/* self.run is the object to call in the new greenlet */
+	run = PyObject_GetAttrString((PyObject*) self, "run");
 	if (run == NULL) {
-		g_passaround_clear();
-		return;
+		Py_XDECREF(exc);
+		Py_XDECREF(val);
+		Py_XDECREF(tb);
+		return -1;
 	}
-	/* now use run_info to store the statedict */
-	o = ts_target->run_info;
-	ts_target->run_info = green_statedict(ts_target->parent);
-	Py_INCREF(ts_target->run_info);
-	Py_XDECREF(o);
+	/* restore saved exception */
+	PyErr_Restore(exc, val, tb);
+
+	/* recheck the state in case getattr caused thread switches */
+	if (!STATE_OK) {
+		Py_DECREF(run);
+		return -1;
+	}
+
+	/* recheck run_info in case greenlet reparented anywhere above */
+	run_info = green_statedict(self);
+	if (run_info == NULL || run_info != ts_current->run_info) {
+		Py_DECREF(run);
+		PyErr_SetString(PyExc_GreenletError, run_info
+				? "cannot switch to a different thread"
+				: "cannot switch to a garbage collected greenlet");
+		return -1;
+	}
+
+	/* by the time we got here another start could happen elsewhere,
+	 * that means it should now be a regular switch
+	 */
+	if (PyGreenlet_STARTED(self)) {
+		Py_DECREF(run);
+		ts_passaround_args = args;
+		ts_passaround_kwargs = kwargs;
+		return 1;
+	}
 
 	/* start the greenlet */
-	ts_target->stack_start = NULL;
-	ts_target->stack_stop = (char*) mark;
+	self->stack_start = NULL;
+	self->stack_stop = (char*) mark;
 	if (ts_current->stack_start == NULL) {
 		/* ts_current is dying */
-		ts_target->stack_prev = ts_current->stack_prev;
+		self->stack_prev = ts_current->stack_prev;
 	}
 	else {
-		ts_target->stack_prev = ts_current;
+		self->stack_prev = ts_current;
 	}
-	ts_target->top_frame = NULL;
-	ts_target->exc_type = NULL;
-	ts_target->exc_value = NULL;
-	ts_target->exc_traceback = NULL;
-	ts_target->recursion_depth = PyThreadState_GET()->recursion_depth;
+	self->top_frame = NULL;
+	self->exc_type = NULL;
+	self->exc_value = NULL;
+	self->exc_traceback = NULL;
+	self->recursion_depth = PyThreadState_GET()->recursion_depth;
+
+	/* restore arguments in case they are clobbered */
+	ts_target = self;
+	ts_passaround_args = args;
+	ts_passaround_kwargs = kwargs;
+
+	/* perform the initial switch */
 	err = g_switchstack();
+
 	/* returns twice!
 	   The 1st time with err=1: we are in the new greenlet
 	   The 2nd time with err=0: back in the caller's greenlet
 	*/
 	if (err == 1) {
 		/* in the new greenlet */
-		PyObject* args;
-		PyObject* kwargs;
+		PyGreenlet* origin;
+#if GREENLET_USE_TRACING
+		PyObject* tracefunc;
+#endif
 		PyObject* result;
-		PyGreenlet* ts_self = ts_current;
-		ts_self->stack_start = (char*) 1;  /* running */
+		PyGreenlet* parent;
+		self->stack_start = (char*) 1;  /* running */
 
-		args = ts_passaround_args;
-		kwargs = ts_passaround_kwargs;
-		if (args == NULL)    /* pending exception */
+		/* grab origin while we still can */
+		origin = ts_origin;
+		ts_origin = NULL;
+
+		/* now use run_info to store the statedict */
+		o = self->run_info;
+		self->run_info = green_statedict(self->parent);
+		Py_INCREF(self->run_info);
+		Py_XDECREF(o);
+
+#if GREENLET_USE_TRACING
+		if ((tracefunc = PyDict_GetItem(self->run_info, ts_tracekey)) != NULL) {
+			Py_INCREF(tracefunc);
+			if (g_calltrace(tracefunc, args ? ts_event_switch : ts_event_throw, origin, self) < 0) {
+				/* Turn trace errors into switch throws */
+				Py_CLEAR(kwargs);
+				Py_CLEAR(args);
+			}
+			Py_DECREF(tracefunc);
+		}
+#endif
+		Py_DECREF(origin);
+
+		if (args == NULL) {
+			/* pending exception */
 			result = NULL;
-		else {
+		} else {
 			/* call g.run(*args, **kwargs) */
 			result = PyEval_CallObjectWithKeywords(
 				run, args, kwargs);
@@ -623,13 +810,27 @@ static void GREENLET_NOINLINE(g_initialstub)(void* mark)
 		result = g_handle_exit(result);
 
 		/* jump back to parent */
-		ts_self->stack_start = NULL;  /* dead */
-		g_switch(ts_self->parent, result, NULL);
-		/* must not return from here! */
-		PyErr_WriteUnraisable((PyObject *) ts_self);
+		self->stack_start = NULL;  /* dead */
+		for (parent = self->parent; parent != NULL; parent = parent->parent) {
+			result = g_switch(parent, result, NULL);
+			/* Return here means switch to parent failed,
+			 * in which case we throw *current* exception
+			 * to the next parent in chain.
+			 */
+			assert(result == NULL);
+		}
+		/* We ran out of parents, cannot continue */
+		PyErr_WriteUnraisable((PyObject *) self);
 		Py_FatalError("greenlets cannot continue");
 	}
 	/* back in the parent */
+	if (err < 0) {
+		/* start failed badly, restore greenlet state */
+		self->stack_start = NULL;
+		self->stack_stop = NULL;
+		self->stack_prev = NULL;
+	}
+	return err;
 }
 
 
@@ -681,16 +882,19 @@ static int kill_greenlet(PyGreenlet* self)
 		   reference */
 		PyObject* result;
 		PyGreenlet* oldparent;
+		PyGreenlet* tmp;
 		if (!STATE_OK) {
 			return -1;
 		}
 		oldparent = self->parent;
 		self->parent = ts_current;
-		Py_INCREF(ts_current);
-		Py_XDECREF(oldparent);
+		Py_INCREF(self->parent);
 		/* Send the greenlet a GreenletExit exception. */
 		PyErr_SetNone(PyExc_GreenletExit);
 		result = g_switch(self, NULL, NULL);
+		tmp = self->parent;
+		self->parent = oldparent;
+		Py_XDECREF(tmp);
 		if (result == NULL)
 			return -1;
 		Py_DECREF(result);
@@ -715,7 +919,7 @@ static int kill_greenlet(PyGreenlet* self)
 	}
 }
 
-#ifdef GREENLET_USE_GC
+#if GREENLET_USE_GC
 static int
 green_traverse(PyGreenlet *self, visitproc visit, void *arg)
 {
@@ -728,20 +932,34 @@ green_traverse(PyGreenlet *self, visitproc visit, void *arg)
 	Py_VISIT(self->exc_type);
 	Py_VISIT(self->exc_value);
 	Py_VISIT(self->exc_traceback);
+	Py_VISIT(self->dict);
 	return 0;
 }
 
 static int green_is_gc(PyGreenlet* self)
 {
-	int rval;
-	/* Main and alive greenlets are not garbage collectable */
-	rval = (self->stack_stop == (char *)-1 || self->stack_start != NULL) ? 0 : 1;
-	return rval;
+	/* Main greenlet can be garbage collected since it can only
+	   become unreachable if the underlying thread exited.
+	   Active greenlet cannot be garbage collected, however. */
+	if (PyGreenlet_MAIN(self) || !PyGreenlet_ACTIVE(self))
+		return 1;
+	return 0;
 }
 
 static int green_clear(PyGreenlet* self)
 {
-	return 0; /* greenlet is not alive, so there's nothing to clear */
+	/* Greenlet is only cleared if it is about to be collected.
+	   Since active greenlets are not garbage collectable, we can
+	   be sure that, even if they are deallocated during clear,
+	   nothing they reference is in unreachable or finalizers,
+	   so even if it switches we are relatively safe. */
+	Py_CLEAR(self->parent);
+	Py_CLEAR(self->run_info);
+	Py_CLEAR(self->exc_type);
+	Py_CLEAR(self->exc_value);
+	Py_CLEAR(self->exc_traceback);
+	Py_CLEAR(self->dict);
+	return 0;
 }
 #endif
 
@@ -749,11 +967,11 @@ static void green_dealloc(PyGreenlet* self)
 {
 	PyObject *error_type, *error_value, *error_traceback;
 
-#ifdef GREENLET_USE_GC
+#if GREENLET_USE_GC
 	PyObject_GC_UnTrack((PyObject *)self);
 	Py_TRASHCAN_SAFE_BEGIN(self);
 #endif /* GREENLET_USE_GC */
-	if (PyGreenlet_ACTIVE(self)) {
+	if (PyGreenlet_ACTIVE(self) && self->run_info != NULL && !PyGreenlet_MAIN(self)) {
 		/* Hacks hacks hacks copied from instance_dealloc() */
 		/* Temporarily resurrect the greenlet. */
 		assert(Py_REFCNT(self) == 0);
@@ -764,33 +982,37 @@ static void green_dealloc(PyGreenlet* self)
 			PyErr_WriteUnraisable((PyObject*) self);
 			/* XXX what else should we do? */
 		}
-		/* Restore the saved exception. */
-		PyErr_Restore(error_type, error_value, error_traceback);
-		/* Undo the temporary resurrection; can't use DECREF here,
-		 * it would cause a recursive call.
+		/* Check for no resurrection must be done while we keep
+		 * our internal reference, otherwise PyFile_WriteObject
+		 * causes recursion if using Py_INCREF/Py_DECREF
 		 */
-		assert(Py_REFCNT(self) > 0);
-		--Py_REFCNT(self);
-		if (Py_REFCNT(self) == 0 && PyGreenlet_ACTIVE(self)) {
+		if (Py_REFCNT(self) == 1 && PyGreenlet_ACTIVE(self)) {
 			/* Not resurrected, but still not dead!
 			   XXX what else should we do? we complain. */
 			PyObject* f = PySys_GetObject("stderr");
+			Py_INCREF(self); /* leak! */
 			if (f != NULL) {
 				PyFile_WriteString("GreenletExit did not kill ",
 						   f);
 				PyFile_WriteObject((PyObject*) self, f, 0);
 				PyFile_WriteString("\n", f);
 			}
-			Py_INCREF(self);   /* leak! */
 		}
-		if (Py_REFCNT(self) != 0) {
+		/* Restore the saved exception. */
+		PyErr_Restore(error_type, error_value, error_traceback);
+		/* Undo the temporary resurrection; can't use DECREF here,
+		 * it would cause a recursive call.
+		 */
+		assert(Py_REFCNT(self) > 0);
+		if (--Py_REFCNT(self) != 0) {
 			/* Resurrected! */
 			Py_ssize_t refcnt = Py_REFCNT(self);
 			_Py_NewReference((PyObject*) self);
-#ifdef GREENLET_USE_GC
+			Py_REFCNT(self) = refcnt;
+#if GREENLET_USE_GC
 			PyObject_GC_Track((PyObject *)self);
 #endif
-			Py_REFCNT(self) = refcnt;
+			_Py_DEC_REFTOTAL;
 #ifdef COUNT_ALLOCS
 			--Py_TYPE(self)->tp_frees;
 			--Py_TYPE(self)->tp_allocs;
@@ -798,16 +1020,17 @@ static void green_dealloc(PyGreenlet* self)
 			goto green_dealloc_end;
 		}
 	}
+	if (self->weakreflist != NULL)
+		PyObject_ClearWeakRefs((PyObject *) self);
 	Py_CLEAR(self->parent);
+	Py_CLEAR(self->run_info);
 	Py_CLEAR(self->exc_type);
 	Py_CLEAR(self->exc_value);
 	Py_CLEAR(self->exc_traceback);
-	if (self->weakreflist != NULL)
-		PyObject_ClearWeakRefs((PyObject *) self);
-	Py_CLEAR(self->run_info);
+	Py_CLEAR(self->dict);
 	Py_TYPE(self)->tp_free((PyObject*) self);
 green_dealloc_end:
-#ifdef GREENLET_USE_GC
+#if GREENLET_USE_GC
 	Py_TRASHCAN_SAFE_END(self);
 #endif /* GREENLET_USE_GC */
 	return;
@@ -864,8 +1087,6 @@ static PyObject* green_switch(
 	PyObject* args,
 	PyObject* kwargs)
 {
-	if (!STATE_OK)
-		return NULL;
 	Py_INCREF(args);
 	Py_XINCREF(kwargs);
 	return single_result(g_switch(self, args, kwargs));
@@ -961,8 +1182,6 @@ green_throw(PyGreenlet *self, PyObject *args)
 		goto failed_throw;
 	}
 
-	if (!STATE_OK)
-		goto failed_throw;
 	return throw_greenlet(self, typ, val, tb);
 
  failed_throw:
@@ -976,6 +1195,36 @@ green_throw(PyGreenlet *self, PyObject *args)
 static int green_bool(PyGreenlet* self)
 {
 	return PyGreenlet_ACTIVE(self);
+}
+
+static PyObject* green_getdict(PyGreenlet* self, void* c)
+{
+	if (self->dict == NULL) {
+		self->dict = PyDict_New();
+		if (self->dict == NULL)
+			return NULL;
+	}
+	Py_INCREF(self->dict);
+	return self->dict;
+}
+
+static int green_setdict(PyGreenlet* self, PyObject* val, void* c)
+{
+	PyObject* tmp;
+
+	if (val == NULL) {
+		PyErr_SetString(PyExc_TypeError, "__dict__ may not be deleted");
+		return -1;
+	}
+	if (!PyDict_Check(val)) {
+		PyErr_SetString(PyExc_TypeError, "__dict__ must be a dictionary");
+		return -1;
+	}
+	tmp = self->dict;
+	Py_INCREF(val);
+	self->dict = val;
+	Py_XDECREF(tmp);
+	return 0;
 }
 
 static PyObject* green_getdead(PyGreenlet* self, void* c)
@@ -1025,6 +1274,7 @@ static PyObject* green_getparent(PyGreenlet* self, void* c)
 static int green_setparent(PyGreenlet* self, PyObject* nparent, void* c)
 {
 	PyGreenlet* p;
+	PyObject* run_info = NULL;
 	if (nparent == NULL) {
 		PyErr_SetString(PyExc_AttributeError, "can't delete attribute");
 		return -1;
@@ -1038,6 +1288,15 @@ static int green_setparent(PyGreenlet* self, PyObject* nparent, void* c)
 			PyErr_SetString(PyExc_ValueError, "cyclic parent chain");
 			return -1;
 		}
+		run_info = PyGreenlet_ACTIVE(p) ? p->run_info : NULL;
+	}
+	if (run_info == NULL) {
+		PyErr_SetString(PyExc_ValueError, "parent must not be garbage collected");
+		return -1;
+	}
+	if (PyGreenlet_STARTED(self) && self->run_info != run_info) {
+		PyErr_SetString(PyExc_ValueError, "parent cannot be on a different thread");
+		return -1;
 	}
 	p = self->parent;
 	self->parent = (PyGreenlet*) nparent;
@@ -1051,6 +1310,13 @@ static PyObject* green_getframe(PyGreenlet* self, void* c)
 	PyObject* result = self->top_frame ? (PyObject*) self->top_frame : Py_None;
 	Py_INCREF(result);
 	return result;
+}
+
+static PyObject* green_getstate(PyGreenlet* self)
+{
+	PyErr_Format(PyExc_TypeError,
+		"cannot serialize '%s' object", Py_TYPE(self)->tp_name);
+	return NULL;
 }
 
 
@@ -1073,10 +1339,6 @@ PyGreenlet_GetCurrent(void)
 static int
 PyGreenlet_SetParent(PyGreenlet *g, PyGreenlet *nparent)
 {
-	if (!STATE_OK) {
-		return -1;
-	}
-
 	if (!PyGreenlet_Check(g)) {
 		PyErr_SetString(PyExc_TypeError, "parent must be a greenlet");
 		return -1;
@@ -1152,10 +1414,13 @@ static PyMethodDef green_methods[] = {
     {"switch", (PyCFunction)green_switch,
      METH_VARARGS | METH_KEYWORDS, green_switch_doc},
     {"throw",  (PyCFunction)green_throw,  METH_VARARGS, green_throw_doc},
+    {"__getstate__", (PyCFunction)green_getstate, METH_NOARGS, NULL},
     {NULL,     NULL}		/* sentinel */
 };
 
 static PyGetSetDef green_getsets[] = {
+	{"__dict__", (getter)green_getdict,
+		     (setter)green_setdict, /*XXX*/ NULL},
 	{"run",    (getter)green_getrun,
 		   (setter)green_setrun, /*XXX*/ NULL},
 	{"parent", (getter)green_getparent,
@@ -1229,7 +1494,7 @@ PyTypeObject PyGreenlet_Type = {
 	0,					/* tp_dict */
 	0,					/* tp_descr_get */
 	0,					/* tp_descr_set */
-	0,					/* tp_dictoffset */
+	offsetof(PyGreenlet, dict),		/* tp_dictoffset */
 	(initproc)green_init,			/* tp_init */
 	GREENLET_tp_alloc,			/* tp_alloc */
 	green_new,				/* tp_new */
@@ -1245,13 +1510,62 @@ static PyObject* mod_getcurrent(PyObject* self)
 	return (PyObject*) ts_current;
 }
 
+#if GREENLET_USE_TRACING
+static PyObject* mod_settrace(PyObject* self, PyObject* args)
+{
+	int err;
+	PyObject* previous;
+	PyObject* tracefunc;
+	PyGreenlet* current;
+	if (!PyArg_ParseTuple(args, "O", &tracefunc))
+		return NULL;
+	if (!STATE_OK)
+		return NULL;
+	current = ts_current;
+	previous = PyDict_GetItem(current->run_info, ts_tracekey);
+	if (previous == NULL)
+		previous = Py_None;
+	Py_INCREF(previous);
+	if (tracefunc == Py_None)
+		err = previous != Py_None ? PyDict_DelItem(current->run_info, ts_tracekey) : 0;
+	else
+		err = PyDict_SetItem(current->run_info, ts_tracekey, tracefunc);
+	if (err < 0)
+		Py_CLEAR(previous);
+	return previous;
+}
+
+static PyObject* mod_gettrace(PyObject* self)
+{
+	PyObject* tracefunc;
+	if (!STATE_OK)
+		return NULL;
+	tracefunc = PyDict_GetItem(ts_current->run_info, ts_tracekey);
+	if (tracefunc == NULL)
+		tracefunc = Py_None;
+	Py_INCREF(tracefunc);
+	return tracefunc;
+}
+#endif
+
 static PyMethodDef GreenMethods[] = {
 	{"getcurrent", (PyCFunction)mod_getcurrent, METH_NOARGS, /*XXX*/ NULL},
+#if GREENLET_USE_TRACING
+	{"settrace", (PyCFunction)mod_settrace, METH_VARARGS, NULL},
+	{"gettrace", (PyCFunction)mod_gettrace, METH_NOARGS, NULL},
+#endif
 	{NULL,     NULL}        /* Sentinel */
 };
 
 static char* copy_on_greentype[] = {
-	"getcurrent", "error", "GreenletExit", NULL
+	"getcurrent",
+	"error",
+	"GreenletExit",
+#if GREENLET_USE_TRACING
+	"settrace",
+	"gettrace",
+#endif
+	NULL
 };
 
 #if PY_MAJOR_VERSION >= 3
@@ -1299,9 +1613,19 @@ initgreenlet(void)
 #if PY_MAJOR_VERSION >= 3
 	ts_curkey = PyUnicode_InternFromString("__greenlet_ts_curkey");
 	ts_delkey = PyUnicode_InternFromString("__greenlet_ts_delkey");
+#if GREENLET_USE_TRACING
+	ts_tracekey = PyUnicode_InternFromString("__greenlet_ts_tracekey");
+	ts_event_switch = PyUnicode_InternFromString("switch");
+	ts_event_throw = PyUnicode_InternFromString("throw");
+#endif
 #else
 	ts_curkey = PyString_InternFromString("__greenlet_ts_curkey");
 	ts_delkey = PyString_InternFromString("__greenlet_ts_delkey");
+#if GREENLET_USE_TRACING
+	ts_tracekey = PyString_InternFromString("__greenlet_ts_tracekey");
+	ts_event_switch = PyString_InternFromString("switch");
+	ts_event_throw = PyString_InternFromString("throw");
+#endif
 #endif
 	if (ts_curkey == NULL || ts_delkey == NULL)
 	{
@@ -1340,11 +1664,8 @@ initgreenlet(void)
 	PyModule_AddObject(m, "error", PyExc_GreenletError);
 	Py_INCREF(PyExc_GreenletExit);
 	PyModule_AddObject(m, "GreenletExit", PyExc_GreenletExit);
-#ifdef GREENLET_USE_GC
-	PyModule_AddObject(m, "GREENLET_USE_GC", PyBool_FromLong(1));
-#else
-	PyModule_AddObject(m, "GREENLET_USE_GC", PyBool_FromLong(0));
-#endif
+	PyModule_AddObject(m, "GREENLET_USE_GC", PyBool_FromLong(GREENLET_USE_GC));
+	PyModule_AddObject(m, "GREENLET_USE_TRACING", PyBool_FromLong(GREENLET_USE_TRACING));
 
         /* also publish module-level data as attributes of the greentype. */
 	for (p=copy_on_greentype; *p; p++) {
